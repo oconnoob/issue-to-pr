@@ -1,0 +1,15 @@
+display_information:
+  name: Issue to PR
+  description: Pull request summaries from DigitalOcean Harness Runtime.
+  background_color: "#0080FF"
+features:
+  bot_user:
+    display_name: Issue to PR
+    always_online: false
+oauth_config:
+  scopes:
+    bot:
+      - incoming-webhook
+settings:
+  incoming_webhooks:
+    incoming_webhooks_enabled: true

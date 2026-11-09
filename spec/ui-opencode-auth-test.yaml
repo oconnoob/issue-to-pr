@@ -1,0 +1,14 @@
+# Template for the UI authentication comparison.
+# The browser does not read your local shell environment. Supply your key
+# privately in the UI, or resolve a gitignored *.local.yaml for import.
+name: issue-to-pr-ui-opencode-check
+harness: opencode
+size: mars-2vcpu-4gb
+env:
+  HARNESS_INFERENCE_MODEL: openai-gpt-oss-120b
+secrets:
+  HARNESS_INFERENCE_API_KEY: ${HARNESS_INFERENCE_API_KEY}
+egress:
+  - inference.do-ai.run
+permissions:
+  default: allow

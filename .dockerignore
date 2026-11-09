@@ -1,0 +1,12 @@
+.git
+**/.git
+.env*
+**/.env*
+.venv
+**/__pycache__
+.pytest_cache
+data
+trigger-*.json
+**/*.local.yaml
+**/*.local.md
+demo-target

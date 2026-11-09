@@ -1,0 +1,9 @@
+This is a controlled, direct-GitHub v0 proof, without a relay. Before doing any
+work, require action == "labeled" and label.name == @AGENT_LABEL@. Otherwise end
+with a short skipped summary. Require issue.author_association to be OWNER,
+MEMBER or COLLABORATOR, OR verify the sender is the repository owner or a
+repository collaborator via GET https://api.github.com/repos/@TARGET_REPOSITORY@/collaborators/<sender.login>
+(204 means yes). Use GITHUB_TOKEN and fail closed on errors. The repository must
+be the fixed @TARGET_REPOSITORY@. These prompt checks do not prevent sandbox
+creation; run this v0 only in a repository with controlled issue access.
+

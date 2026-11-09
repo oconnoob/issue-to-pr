@@ -1,0 +1,60 @@
+# doctl expands these environment variables when creating the trigger.
+name: issue-to-pr
+harness: opencode
+size: mars-2vcpu-4gb
+repos:
+  - ${GITHUB_REPOSITORY}
+env:
+  HARNESS_INFERENCE_MODEL: openai-gpt-oss-120b
+  TARGET_REPOSITORY: ${GITHUB_REPOSITORY}
+  TARGET_DEFAULT_BRANCH: ${DEFAULT_BRANCH}
+  # Git consumes the credential helper output directly; no token is stored in git config.
+  GIT_TERMINAL_PROMPT: "0"
+  GIT_CONFIG_COUNT: "1"
+  GIT_CONFIG_KEY_0: credential.https://github.com/${GITHUB_REPOSITORY}.git.helper
+  GIT_CONFIG_VALUE_0: >-
+    !python3 -c 'import os,sys; sys.stdout.write("username=x-access-token\npassword=" + os.environ["GITHUB_TOKEN"] + "\n\n") if sys.argv[-1] == "get" else None'
+secrets:
+  HARNESS_INFERENCE_API_KEY: ${HARNESS_INFERENCE_API_KEY}
+  GITHUB_TOKEN:
+    source: oauth
+    provider: github
+    actor: ${GITHUB_ACTOR}
+egress:
+  - github.com
+  - api.github.com
+  - inference.do-ai.run
+permissions:
+  default: allow
+  # Literal command patterns are guardrails; protect the default branch on GitHub.
+  rules:
+    - tool: bash
+      match: { command: "*echo*GITHUB_TOKEN*" }
+      action: deny
+    - tool: bash
+      match: { command: "*printenv*" }
+      action: deny
+    - tool: bash
+      match: { command: "*set -x*" }
+      action: deny
+    - tool: bash
+      match: { command: "*git push*--force*" }
+      action: deny
+    - tool: bash
+      match: { command: "*git push* -f*" }
+      action: deny
+    - tool: bash
+      match: { command: "*git push* origin ${DEFAULT_BRANCH}*" }
+      action: deny
+    - tool: bash
+      match: { command: "*git push* origin HEAD:${DEFAULT_BRANCH}*" }
+      action: deny
+    - tool: bash
+      match: { command: "*git push* origin HEAD:refs/heads/${DEFAULT_BRANCH}*" }
+      action: deny
+    - tool: bash
+      match: { command: "*rm -rf*" }
+      action: deny
+    - tool: bash
+      match: { command: "*rm -fr*" }
+      action: deny

@@ -1,0 +1,21 @@
+.env
+.env.*
+!.env.example
+.venv/
+__pycache__/
+.pytest_cache/
+*.pyc
+data/
+*.sqlite3*
+trigger-*.json
+.DS_Store
+# Separate private GitHub target; it has its own git history.
+demo-target/
+# Resolved UI imports contain local credentials.
+spec/*.local.yaml
+# Local diagnostic records are not part of the shareable tutorial.
+**/*.local.md
+# Local writing drafts.
+blog.md
+docs/recording.md
+docs/recording-issue.md

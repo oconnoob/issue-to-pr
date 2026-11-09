@@ -1,0 +1,6 @@
+{$RELAY_DOMAIN} {
+	request_body {
+		max_size 1MiB
+	}
+	reverse_proxy relay:8000
+}
