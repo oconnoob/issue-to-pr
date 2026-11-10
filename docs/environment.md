@@ -101,8 +101,9 @@ returned by that trigger. See [DO's GitHub connection guide](https://docs.digita
 | `RELAY_GITHUB_TOKEN` | Create the GitHub PAT described below; used only to check labeler access |
 | `HARNESS_TRIGGER_URL` | Copy from `bash scripts/create-trigger.sh relay --opencode` output |
 | `HARNESS_TRIGGER_SECRET` | Copy the one-time secret from that same **custom** trigger response |
-| `DATABASE_PATH` | Local SQLite location; keep the example default locally. Docker sets `/data/relay.sqlite3` |
-| `RELAY_DOMAIN` | A hostname you control, with DNS pointing at the relay Droplet; only needed for HTTPS deployment |
+| `DATABASE_PATH` | Local SQLite location, used only when `DATABASE_URL` is empty |
+| `DATABASE_URL` | PostgreSQL connection URL; App Platform binds `${relay-db.DATABASE_URL}` at runtime and this takes precedence over `DATABASE_PATH` |
+| `APP_PLATFORM` | Set to `true` by the app spec; startup requires PostgreSQL when present |
 
 For `RELAY_GITHUB_TOKEN`, in GitHub open **Settings → Developer settings → Personal
 access tokens → Fine-grained tokens → Generate new token**. Select your repository's
@@ -119,3 +120,10 @@ v0 trigger and relay custom trigger also have different secrets; do not mix them
 Save credentials only in the gitignored `.env`, never in `.env.example`. Reload
 the environment after edits before running setup scripts. Existing triggers keep
 their captured credentials until you update or recreate them.
+
+For hosted deployment, use [the App Platform guide](../README.md#4-deploy-the-optional-relay-on-app-platform).
+Set relay secrets as runtime Secret values. App Platform supplies the HTTPS domain
+and database URL. No `RELAY_DOMAIN` is needed. Use a direct PostgreSQL endpoint,
+not transaction pooling, so the worker's session advisory lock stays attached to
+its connection. The demo spec includes a development database; use Managed
+PostgreSQL for production. Database URLs are credentials too.

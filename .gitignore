@@ -19,3 +19,6 @@ spec/*.local.yaml
 blog.md
 docs/recording.md
 docs/recording-issue.md
+
+# Private App Platform spec copies can contain deployment secrets.
+deploy/*.local.yaml

@@ -1,0 +1,66 @@
+# Demo-sized App Platform service and development PostgreSQL database.
+# Replace the source repo with your setup-repo copy. Set runtime secrets in the
+# Control Panel before deployment; empty values below are intentional.
+name: issue-to-pr-relay
+region: nyc
+services:
+  - name: relay
+    github:
+      repo: oconnoob/issue-to-pr
+      branch: main
+      deploy_on_push: false
+    source_dir: /
+    dockerfile_path: deploy/Dockerfile
+    http_port: 8000
+    instance_count: 1
+    instance_size_slug: apps-s-1vcpu-0.5gb
+    health_check:
+      http_path: /healthz
+      initial_delay_seconds: 10
+      period_seconds: 10
+      timeout_seconds: 5
+      failure_threshold: 3
+    envs:
+      - key: APP_PLATFORM
+        value: "true"
+        scope: RUN_TIME
+      - key: DATABASE_URL
+        value: ${relay-db.DATABASE_URL}
+        scope: RUN_TIME
+        type: SECRET
+      - key: GITHUB_REPOSITORY
+        value: your-owner/your-demo-repo
+        scope: RUN_TIME
+      - key: AGENT_LABEL
+        value: agent
+        scope: RUN_TIME
+      - key: GITHUB_WEBHOOK_SECRET
+        value: ""
+        type: SECRET
+        scope: RUN_TIME
+      - key: RELAY_GITHUB_TOKEN
+        value: ""
+        type: SECRET
+        scope: RUN_TIME
+      - key: HARNESS_TRIGGER_URL
+        value: ""
+        type: SECRET
+        scope: RUN_TIME
+      - key: HARNESS_TRIGGER_SECRET
+        value: ""
+        type: SECRET
+        scope: RUN_TIME
+    termination:
+      grace_period_seconds: 30
+databases:
+  - name: relay-db
+    engine: PG
+    version: "18"
+    production: false
+ingress:
+  rules:
+    - component:
+        name: relay
+      match:
+        path:
+          prefix: /

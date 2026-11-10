@@ -6,9 +6,10 @@ The direct GitHub-to-OpenCode path has been tested live through PR creation,
 with all four demo regression tests passing independently on the pushed commit.
 Slack output is configured, but receipt must be checked in the selected channel.
 
-The relay has local tests and Docker smoke validation. A live Droplet relay
-deployment has not been verified. The deployment instructions create your own
-service; running setup scripts alone does not deploy it.
+The relay supports SQLite locally and PostgreSQL on App Platform. Tests cover
+both databases. To verify the hosted path, deploy the relay on App Platform and
+run the example with your own webhook and custom trigger. The trigger setup
+scripts alone do not deploy the relay.
 
 ## What do the setup scripts actually do?
 
@@ -20,19 +21,21 @@ service; running setup scripts alone does not deploy it.
 | `doctl harness-runtime create --spec … --dry-run` | Parses/resolves the environment spec without starting a session |
 | `scripts/create-trigger.sh direct --opencode` | Creates a fresh-session GitHub trigger with Slack output |
 | `scripts/create-trigger.sh relay --opencode` | Creates a separate custom-provider trigger for the relay |
-| Docker Compose command in the deployment guide | Builds and starts the relay and Caddy on the machine where you run it |
+| `doctl apps propose --spec deploy/app.yaml` | Validates an App Platform proposal without creating resources |
+| Create a new app from the reviewed spec in App Platform | Deploys the relay and provisions its demo database; incurs charges |
 
 Run the shell scripts with `bash`. They consume exported settings, not `.env`
-automatically. Creating a DO trigger does not create a GitHub webhook, deploy a
-Droplet, start a local server or establish a tunnel.
+automatically. Creating a DO trigger does not create a GitHub webhook, deploy the
+relay, start a local server or establish a tunnel.
 
-## Do I need a relay, ngrok or a Droplet to test?
+## Do I need a relay or a tunnel to test?
 
 For the direct proof, no: GitHub calls DO's public trigger URL. Your laptop can
 be offline after configuration. A fresh hosted agent session does the work.
 
 For the relay path, GitHub must reach `POST /webhooks/github` on your relay over
-public HTTPS. The README deploys it with Caddy on a Droplet. For temporary local
+public HTTPS. The README deploys it on App Platform with PostgreSQL and the
+generated HTTPS address. No custom domain is required. For temporary local
 testing, run the relay locally and expose its port 8000 through an HTTPS tunnel
 such as ngrok; use `https://YOUR_TUNNEL_HOST/webhooks/github` as the GitHub payload
 URL. Use the GitHub-to-relay secret there. The tunnel does not replace signature

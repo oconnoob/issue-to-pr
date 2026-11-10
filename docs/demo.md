@@ -126,3 +126,12 @@ For another trial, use a fresh demo copy, issue, and trigger name. Re-labeling a
 issue with an existing agent PR should return that PR. See
 [duplicate handling](../README.md#duplicate-handling-when-issues-or-prs-change)
 for closed PRs, deleted branches, and retries.
+
+## Optional hosted relay
+
+This walkthrough proves the direct GitHub-to-Harness Runtime path. The optional
+relay is deployed separately on [App Platform with PostgreSQL](../README.md#4-deploy-the-optional-relay-on-app-platform).
+Use the generated HTTPS domain. Before switching GitHub to it, disable the direct
+webhook and pause its **Harness Runtime trigger**; use a separate custom trigger
+behind the relay. Relay deployment and its Slack result require their own live
+verification. Local tests do not establish that it has been deployed.

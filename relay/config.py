@@ -16,6 +16,15 @@ class Settings:
     label: str = "agent"
     database: str = "./data/relay.sqlite3"
 
+    @staticmethod
+    def database_from_env():
+        url = os.environ.get("DATABASE_URL", "")
+        if url and not url.startswith(("postgresql://", "postgres://")):
+            raise ValueError("DATABASE_URL must be a PostgreSQL URL")
+        if os.environ.get("APP_PLATFORM") and not url:
+            raise ValueError("App Platform requires DATABASE_URL; SQLite is local only")
+        return url or os.environ.get("DATABASE_PATH", "./data/relay.sqlite3")
+
     @classmethod
     def from_env(cls):
         def required(name):
@@ -31,7 +40,7 @@ class Settings:
             trigger_url=required("HARNESS_TRIGGER_URL"),
             trigger_secret=required("HARNESS_TRIGGER_SECRET"),
             label=os.environ.get("AGENT_LABEL", "agent"),
-            database=os.environ.get("DATABASE_PATH", "./data/relay.sqlite3"),
+            database=cls.database_from_env(),
         )
         if not re.fullmatch(r"[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+", settings.repository):
             raise ValueError("GITHUB_REPOSITORY must be owner/repo")

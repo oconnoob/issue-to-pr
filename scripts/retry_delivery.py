@@ -1,17 +1,31 @@
-"""Requeue one failed/uncertain delivery AFTER reconciling DO executions."""
+"""Requeue one failed/uncertain delivery AFTER reconciling DO executions.
+
+Run from the project root: python -m scripts.retry_delivery ...
+"""
 
 import argparse
-import os
-import sqlite3
 from uuid import UUID
 
-parser = argparse.ArgumentParser(description=__doc__)
-parser.add_argument("delivery", type=UUID)
-parser.add_argument("--confirmed-no-execution", action="store_true", required=True,
-                    help="Confirm you checked the trigger executions and no run was accepted")
-args = parser.parse_args()
-with sqlite3.connect(os.environ.get("DATABASE_PATH", "./data/relay.sqlite3")) as db:
-    cursor = db.execute("""UPDATE deliveries SET status='pending', attempts=0, next_at=0,
-        reason=NULL WHERE source='github' AND delivery=? AND status IN ('failed', 'uncertain')""",
-        (str(args.delivery),))
-    print(f"Requeued {cursor.rowcount} delivery")
+from relay.config import Settings
+from relay.delivery import Inbox
+
+
+def main():
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("delivery", type=UUID)
+    parser.add_argument("--confirmed-no-execution", action="store_true", required=True,
+                        help="Confirm you checked trigger executions and no run was accepted")
+    args = parser.parse_args()
+    inbox = None
+    try:
+        inbox = Inbox(Settings.database_from_env())
+        print(f"Requeued {inbox.retry(str(args.delivery))} delivery")
+    except Exception:
+        parser.exit(1, "Retry failed; check database configuration/connectivity privately.\n")
+    finally:
+        if inbox is not None:
+            inbox.close()
+
+
+if __name__ == "__main__":
+    main()

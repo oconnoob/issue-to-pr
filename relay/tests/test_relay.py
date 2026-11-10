@@ -31,11 +31,12 @@ def event():
     }
 
 
-@pytest.fixture
-def settings(tmp_path):
+@pytest.fixture(params=["sqlite", "postgres"])
+def settings(tmp_path, request):
     return Settings("demo/project", "github-test-secret", "lookup-test-token",
                     "https://api.digitalocean.com/test-trigger", "do-test-secret",
-                    database=str(tmp_path / "relay.sqlite3"))
+                    database=(request.getfixturevalue("postgres_url") if request.param == "postgres"
+                              else str(tmp_path / "relay.sqlite3")))
 
 
 @pytest.fixture
@@ -228,13 +229,14 @@ def test_queue_and_dedup_survive_restart(settings, event):
 def test_crash_during_send_is_not_automatically_replayed(settings):
     inbox = Inbox(settings.database)
     inbox.enqueue("github", str(uuid4()), {"payload": {}})
+    assert inbox.ensure_leader()
     inbox.update(inbox.next(), "sending")
-    inbox.db.close()
+    inbox.close()
     inbox = Inbox(settings.database)
-    inbox.recover()
+    assert inbox.ensure_leader()
     assert inbox.next() is None
-    assert inbox.db.execute("SELECT status FROM deliveries").fetchone()[0] == "uncertain"
-    inbox.db.close()
+    assert inbox.db.execute("SELECT status FROM deliveries").fetchone()["status"] == "uncertain"
+    inbox.close()
 
 
 @pytest.mark.parametrize("response,expected", [
@@ -358,3 +360,43 @@ def test_invalid_configuration_fails_at_startup(monkeypatch, change):
         monkeypatch.setenv(key, value)
     with pytest.raises(ValueError):
         Settings.from_env()
+
+
+def test_persistence_failure_is_not_acknowledged(make_client, event, monkeypatch):
+    client, app, calls = make_client()
+
+    def fail(*args):
+        raise RuntimeError("PRIVATE-DATABASE-URL")
+
+    monkeypatch.setattr(app.state.inbox, "enqueue", fail)
+    response = send(client, event)
+    assert response.status_code == 503
+    assert "PRIVATE" not in response.text
+    assert not calls
+
+
+def test_database_failure_is_unhealthy(make_client, monkeypatch):
+    client, app, _ = make_client()
+
+    def fail():
+        raise RuntimeError("PRIVATE-DATABASE-URL")
+
+    monkeypatch.setattr(app.state.inbox, "health", fail)
+    response = client.get("/healthz")
+    assert response.status_code == 503
+    assert "PRIVATE" not in response.text
+
+
+def test_database_environment_selection(monkeypatch):
+    monkeypatch.delenv("APP_PLATFORM", raising=False)
+    monkeypatch.delenv("DATABASE_URL", raising=False)
+    monkeypatch.setenv("DATABASE_PATH", "/tmp/local.sqlite3")
+    assert Settings.database_from_env() == "/tmp/local.sqlite3"
+    monkeypatch.setenv("APP_PLATFORM", "true")
+    with pytest.raises(ValueError, match="requires DATABASE_URL"):
+        Settings.database_from_env()
+    monkeypatch.setenv("DATABASE_URL", "sqlite:///ephemeral.db")
+    with pytest.raises(ValueError, match="PostgreSQL URL"):
+        Settings.database_from_env()
+    monkeypatch.setenv("DATABASE_URL", "postgresql://localhost/relay")
+    assert Settings.database_from_env() == "postgresql://localhost/relay"

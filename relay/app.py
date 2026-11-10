@@ -26,7 +26,6 @@ def create_app(settings=None, client=None, run_worker=True):
         async with httpx.AsyncClient(timeout=10, follow_redirects=False) as default_client:
             transport = client if client is not None else default_client
             inbox = Inbox(settings.database)
-            inbox.recover()
             # Add a new source by implementing its handler and registering it here.
             sources = {"github": GitHub(settings, transport)}
             worker = Worker(settings, inbox, sources, transport)
@@ -41,7 +40,7 @@ def create_app(settings=None, client=None, run_worker=True):
                     task.cancel()
                     with suppress(asyncio.CancelledError):
                         await task
-                inbox.db.close()
+                inbox.close()
 
     app = FastAPI(lifespan=lifespan, docs_url=None, redoc_url=None, openapi_url=None)
 
@@ -49,7 +48,10 @@ def create_app(settings=None, client=None, run_worker=True):
     async def health():
         if app.state.task and app.state.task.done():
             raise HTTPException(503, "Worker stopped; inspect service logs")
-        app.state.inbox.db.execute("SELECT 1")
+        try:
+            app.state.inbox.health()
+        except Exception:
+            raise HTTPException(503, "Database unavailable") from None
         return {"status": "ok"}
 
     @app.post("/webhooks/{source}", status_code=202)
@@ -74,7 +76,11 @@ def create_app(settings=None, client=None, run_worker=True):
             log.warning("source=%s decision=rejected reason=%s", source, error.detail)
             raise
         # Persist before acknowledging; a restart keeps the queue and dedup records.
-        inserted = app.state.inbox.enqueue(source, delivery, candidate)
+        try:
+            inserted = app.state.inbox.enqueue(source, delivery, candidate)
+        except Exception:
+            log.error("source=%s decision=rejected reason=persistence_unavailable", source)
+            raise HTTPException(503, "Delivery was not acknowledged; retry later") from None
         decision = "queued" if inserted else "duplicate"
         log.info("source=%s delivery=%s decision=%s", source, delivery, decision)
         return {"status": decision}

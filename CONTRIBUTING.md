@@ -13,6 +13,13 @@ python3 -m venv .venv
 .venv/bin/python -m pytest -q
 ```
 
+For PostgreSQL changes, set `TEST_DATABASE_URL` to a disposable local PostgreSQL
+database and run the same suite. The test user needs schema create/drop access;
+each test uses an isolated schema. Without this variable, PostgreSQL cases skip.
+These tests mock external HTTP and need no DigitalOcean, GitHub or Slack secrets.
+Validate deployment-spec changes with `doctl apps propose --spec deploy/app.yaml`;
+this creates no resources.
+
 The separate shipping demo intentionally fails its exact-threshold test. Do not
 fix the bug or weaken its expected values on the template's default branch; the
 agent should propose that fix in each participant's own copied repository.

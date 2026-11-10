@@ -1,4 +1,4 @@
-"""One SQLite inbox and one worker. No agent runs in the relay process."""
+"""Durable inbox with one forwarding leader. No agent runs in this process."""
 
 import asyncio
 import hashlib
@@ -11,6 +11,9 @@ import time
 from uuid import UUID
 
 import httpx
+import psycopg
+from psycopg.rows import dict_row
+from psycopg.conninfo import conninfo_to_dict
 
 log = logging.getLogger("relay")
 
@@ -22,47 +25,133 @@ def signature(secret, body, timestamp):
     return f"t={timestamp},v1={digest}"
 
 
+# Stable, database-scoped keys; every replica of this relay uses the same lock.
+WORKER_LOCK = 716239801
+SCHEMA_LOCK = 716239802
+
+
 class Inbox:
-    def __init__(self, path):
-        Path(path).parent.mkdir(parents=True, exist_ok=True)
-        self.db = sqlite3.connect(path, timeout=5, check_same_thread=False)
-        self.db.row_factory = sqlite3.Row
-        self.db.execute("PRAGMA journal_mode=WAL")
-        self.db.execute("""CREATE TABLE IF NOT EXISTS deliveries (
-            source TEXT NOT NULL, delivery TEXT NOT NULL, candidate TEXT NOT NULL,
-            status TEXT NOT NULL DEFAULT 'pending', attempts INTEGER NOT NULL DEFAULT 0,
-            next_at REAL NOT NULL DEFAULT 0, reason TEXT, execution_id TEXT,
-            PRIMARY KEY (source, delivery))""")
-        self.db.commit()
+    def __init__(self, database):
+        self.database = database
+        self.postgres = database.startswith(("postgresql://", "postgres://"))
+        self.leader_db = None
+        self.leading = False
+        if self.postgres:
+            self.db = self.connect()
+        else:
+            Path(database).parent.mkdir(parents=True, exist_ok=True)
+            self.db = sqlite3.connect(database, timeout=5, check_same_thread=False)
+            self.db.row_factory = sqlite3.Row
+            self.db.execute("PRAGMA journal_mode=WAL")
+        try:
+            # Serialize first-boot DDL across rolling/parallel app starts.
+            with self.db.transaction() if self.postgres else self.db:
+                if self.postgres:
+                    self.db.execute("SELECT pg_advisory_xact_lock(%s)", (SCHEMA_LOCK,))
+                self.db.execute("""CREATE TABLE IF NOT EXISTS deliveries (
+                    source TEXT NOT NULL, delivery TEXT NOT NULL, candidate TEXT NOT NULL,
+                    status TEXT NOT NULL DEFAULT 'pending', attempts INTEGER NOT NULL DEFAULT 0,
+                    next_at DOUBLE PRECISION NOT NULL DEFAULT 0, reason TEXT, execution_id TEXT,
+                    PRIMARY KEY (source, delivery))""")
+        except BaseException:
+            self.db.close()
+            raise
+
+    def connect(self):
+        # A direct session is required: transaction-pooling proxies cannot hold
+        # session advisory locks. Never reconnect a former leader silently.
+        options = conninfo_to_dict(self.database).get("options", "")
+        return psycopg.connect(self.database, autocommit=True, row_factory=dict_row,
+                               connect_timeout=5,
+                               options=options + " -c statement_timeout=5000")
+
+    def execute(self, sql, parameters=(), *, worker=False):
+        db = self.leader_db if worker and self.postgres else self.db
+        if self.postgres:
+            return db.execute(sql.replace("?", "%s"), parameters)
+        cursor = db.execute(sql, parameters)
+        db.commit()
+        return cursor
+
+    def ensure_leader(self):
+        if self.leading:
+            return True
+        if self.postgres:
+            if self.leader_db is None:
+                self.leader_db = self.connect()
+            locked = self.leader_db.execute(
+                "SELECT pg_try_advisory_lock(%s) AS locked", (WORKER_LOCK,)
+            ).fetchone()["locked"]
+            if not locked:
+                return False
+        self.leading = True
+        # Only a new leader may classify an interrupted send. A standby starting
+        # must not touch a delivery still being sent by the current leader.
+        self.recover()
+        log.info("decision=worker_leader")
+        return True
 
     def enqueue(self, source, delivery, candidate):
-        with self.db:
-            cursor = self.db.execute(
-                "INSERT OR IGNORE INTO deliveries (source, delivery, candidate) VALUES (?, ?, ?)",
-                (source, delivery, json.dumps(candidate)),
-            )
+        cursor = self.execute(
+            """INSERT INTO deliveries (source, delivery, candidate) VALUES (?, ?, ?)
+               ON CONFLICT (source, delivery) DO NOTHING""",
+            (source, delivery, json.dumps(candidate)),
+        )
         return bool(cursor.rowcount)
 
     def update(self, row, status, reason=None, execution_id=None, delay=0):
-        with self.db:
-            self.db.execute("""UPDATE deliveries SET status=?, reason=?, execution_id=?,
-                next_at=? WHERE source=? AND delivery=?""",
-                (status, reason, execution_id, time.time() + delay, row["source"], row["delivery"]))
+        # The sending marker commits on the session holding the lock. If that
+        # session is lost during authorization, this fails before any POST.
+        self.execute("""UPDATE deliveries SET status=?, reason=?, execution_id=?,
+            next_at=? WHERE source=? AND delivery=?""",
+            (status, reason, execution_id, time.time() + delay, row["source"], row["delivery"]),
+            worker=self.leading)
+
+    def authorization_failed(self, row):
+        attempts = row["attempts"] + 1
+        self.execute("UPDATE deliveries SET attempts=? WHERE source=? AND delivery=?",
+                     (attempts, row["source"], row["delivery"]), worker=True)
+        self.update(row, "pending" if attempts < 5 else "failed",
+                    "authorization_unavailable", delay=min(60, 2 ** attempts))
+        return attempts
 
     def recover(self):
-        # A crash after POST may have created an execution. Never blindly send twice.
-        interrupted = self.db.execute(
-            "SELECT source, delivery FROM deliveries WHERE status='sending'").fetchall()
-        with self.db:
-            self.db.execute("""UPDATE deliveries SET status='uncertain', reason='restart_during_send'
-                WHERE status='sending'""")
+        if self.postgres and not self.leading:
+            raise RuntimeError("Recovery requires worker leadership")
+        interrupted = self.execute(
+            "SELECT source, delivery FROM deliveries WHERE status='sending'",
+            worker=self.leading).fetchall()
+        self.execute("""UPDATE deliveries SET status='uncertain', reason='restart_during_send'
+            WHERE status='sending'""", worker=self.leading)
         for row in interrupted:
             log.warning("source=%s delivery=%s decision=uncertain reason=restart_during_send",
                         row["source"], row["delivery"])
 
     def next(self):
-        return self.db.execute("""SELECT * FROM deliveries WHERE status='pending'
-            AND next_at <= ? ORDER BY rowid LIMIT 1""", (time.time(),)).fetchone()
+        return self.execute("""SELECT * FROM deliveries WHERE status='pending'
+            AND next_at <= ? ORDER BY next_at, source, delivery LIMIT 1""",
+            (time.time(),), worker=self.leading).fetchone()
+
+    def retry(self, delivery):
+        return self.execute("""UPDATE deliveries SET status='pending', attempts=0, next_at=0,
+            reason=NULL, execution_id=NULL WHERE source='github' AND delivery=?
+            AND status IN ('failed', 'uncertain')""", (delivery,)).rowcount
+
+    def health(self):
+        self.db.execute("SELECT 1")
+        if self.leading and self.postgres:
+            self.leader_db.execute("SELECT 1")
+
+    def release_leadership(self):
+        # Keep the closed connection reference: a former leader cannot reconnect
+        # and resume a delivery after another instance has taken over.
+        self.leading = False
+        if self.leader_db is not None:
+            self.leader_db.close()
+
+    def close(self):
+        self.release_leadership()
+        self.db.close()
 
 
 class Worker:
@@ -75,6 +164,8 @@ class Worker:
                  row["source"], row["delivery"], status, reason, execution_id or "-")
 
     async def process_one(self):
+        if not self.inbox.ensure_leader():
+            return False
         row = self.inbox.next()
         if row is None:
             return False
@@ -83,12 +174,7 @@ class Worker:
             allowed = await self.sources[row["source"]].authorized(candidate)
         except httpx.HTTPError:
             # Authorization GET is safe to retry; errors never grant permission.
-            attempts = row["attempts"] + 1
-            with self.inbox.db:
-                self.inbox.db.execute("UPDATE deliveries SET attempts=? WHERE source=? AND delivery=?",
-                                      (attempts, row["source"], row["delivery"]))
-            self.inbox.update(row, "pending" if attempts < 5 else "failed",
-                              "authorization_unavailable", delay=min(60, 2 ** attempts))
+            attempts = self.inbox.authorization_failed(row)
             log.warning("source=%s delivery=%s decision=%s reason=authorization_unavailable",
                         row["source"], row["delivery"], "retry" if attempts < 5 else "failed")
             return True
@@ -132,3 +218,5 @@ class Worker:
             log.error("decision=worker_stopped reason=%s", type(error).__name__)
             # Completing the task makes /healthz fail without an unsafe traceback.
             return
+        finally:
+            self.inbox.release_leadership()

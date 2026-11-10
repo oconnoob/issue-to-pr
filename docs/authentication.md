@@ -72,3 +72,12 @@ using your own IDs:
 doctl --context "$DOCTL_CONTEXT" harness-runtime triggers get-execution \
   TRIGGER_ID EXECUTION_ID
 ```
+
+## Relay deployment credentials
+
+App Platform's GitHub integration reads the setup repository to build the relay.
+The relay's `RELAY_GITHUB_TOKEN` only checks labeler access to the demo target;
+the sandbox's OAuth connection separately authorizes pushes and PRs. Runtime
+Secret values belong on the relay component, not in the Docker build. A database
+connection failure should be diagnosed privately; do not print `DATABASE_URL`.
+See [App Platform setup](../README.md#4-deploy-the-optional-relay-on-app-platform).

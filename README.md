@@ -6,7 +6,8 @@ The agent makes a change, runs tests, pushes a feature branch, and opens a PR.
 Harness Runtime posts the agent's final summary to Slack. A person reviews the PR.
 There are no issue comments, automated merges, or replies from Slack.
 
-This example starts with a direct GitHub-to-trigger v0, then adds the relay.
+This example starts with a direct GitHub-to-trigger v0, then optionally adds a
+relay hosted on DigitalOcean App Platform with PostgreSQL.
 The relay runs no model and needs no DigitalOcean API token.
 
 ## Try it in your own repositories
@@ -45,9 +46,8 @@ repository, use [examples/shipping-api](examples/shipping-api/) and the
 
 ```mermaid
 flowchart LR
-    G[GitHub issue labeled agent] -->|Signed issues webhook| C[Caddy HTTPS on a Droplet]
-    C --> R[Python relay]
-    R -->|Verify and filter| Q[(SQLite inbox and delivery IDs)]
+    G[GitHub issue labeled agent] -->|Signed issues webhook over HTTPS| R[Python relay on App Platform]
+    R -->|Verify and filter| Q[(PostgreSQL inbox and delivery IDs)]
     Q --> W[Check author or labeler trust]
     W -->|Timestamped HMAC over slim JSON| T[Harness Runtime custom trigger]
     T --> A[Fresh coding agent sandbox]
@@ -56,10 +56,10 @@ flowchart LR
     P --> H[Human review]
 ```
 
-## What was verified
+The diagram shows the optional relay path. The simple demo calls Harness Runtime
+directly and needs no relay deployment.
 
-Checked on **6 November 2026**, using DigitalOcean's public docs and the live
-`doctl harness-runtime triggers list-providers` response. Local CLI: 2.1.0.
+## Harness Runtime behavior
 
 | Detail | Result |
 | --- | --- |
@@ -69,8 +69,8 @@ Checked on **6 November 2026**, using DigitalOcean's public docs and the live
 | Repository checkout | `repos` advertises the repository; the agent must clone it |
 | Egress | The platform also adds required platform, adapter and inference hosts |
 | Trigger event filter | None documented; v0 starts sandboxes for unrelated issue events too |
-| `gh` in the sandbox image | Verified in the current Claude image during auth diagnostics; PR creation still uses REST |
-| Validation | 66 local tests passed (9 November); CLI spec dry runs, Docker/container smoke and Compose/Caddy checks passed. A direct OpenCode run opened a demo PR, and all 4 tests passed independently on its pushed commit. The sample API's before/after curl responses were checked locally. A live Droplet relay deployment and Slack message receipt were not independently verified |
+| Pull request creation | The agent uses GitHub's REST API; `gh` is optional |
+| Validation | The direct OpenCode demo opened a PR that passed all four regression tests. Relay tests cover SQLite and PostgreSQL, including overlapping instances and worker recovery. App Platform proposal validation does not deploy the relay. Verify Slack receipt in your own channel |
 
 Sources: [trigger guide](https://docs.digitalocean.com/products/managed-agents/agent-harness-runtime/how-to/run-agents-with-triggers/),
 [PR-review example](https://docs.digitalocean.com/products/managed-agents/agent-harness-runtime/examples/review-pull-requests/),
@@ -87,8 +87,9 @@ Sources: [trigger guide](https://docs.digitalocean.com/products/managed-agents/a
   command and controlled issue access for v0. Protect its default branch: require
   PRs and human approval; do not grant the agent's account a bypass.
 - A DigitalOcean model access key and a Slack incoming webhook for the demo channel.
-- Python 3.12+ locally. For deployment: an Ubuntu Droplet, Docker Engine with the
-  Compose plugin, and a domain whose A record points at the Droplet.
+- Python 3.12+ locally. Optional relay hosting uses App Platform and PostgreSQL;
+  App Platform provides the HTTPS address. The app and database incur charges
+  when you create them.
 
 ## 1. Configure the example
 
@@ -228,10 +229,12 @@ they are guardrails, not a guarantee against every possible disclosure.
 
 ## 3. Add the relay
 
-Disable/remove the direct GitHub webhook and pause its trigger to avoid two runs:
+Prepare this stage independently of the active direct demo. When ready to cut
+over, disable the direct GitHub webhook and pause its **Harness Runtime trigger**
+in DigitalOcean to avoid two routes starting agents. Create a separate trigger
+while preparing the relay:
 
 ```bash
-doctl --context "$DOCTL_CONTEXT" harness-runtime triggers pause DIRECT_TRIGGER_ID
 doctl --context "$DOCTL_CONTEXT" harness-runtime triggers list-providers
 bash scripts/create-trigger.sh relay --opencode
 ```
@@ -262,7 +265,7 @@ Missing trust or unavailable authorization never grants access.
 Only repo full name, clone URL, default branch, issue number, title, body and URL
 reach the trigger. GitHub signatures use the exact received bytes; outgoing DO
 signatures use the exact compact UTF-8 JSON sent, prefixed by the current Unix
-timestamp and a dot. Keep the Droplet clock synchronized.
+timestamp and a dot. Hosted instances use the platform clock.
 
 To run locally and execute the tests:
 
@@ -278,44 +281,106 @@ Local HTTP is useful for health checks; GitHub needs the HTTPS deployment below.
 The endpoint is `POST /webhooks/github`; `GET /healthz` checks the process, worker
 and database. It does not assert DO or GitHub availability.
 
-## 4. Deploy on a Droplet with HTTPS
+## 4. Deploy the optional relay on App Platform
 
-Use a basic Ubuntu Droplet with Docker Engine and Compose installed following
-[Docker's Ubuntu instructions](https://docs.docker.com/engine/install/ubuntu/).
-Allow inbound SSH, TCP 80 and TCP 443 in its firewall. Do not expose port 8000.
-Point your domain's A record at the Droplet; remove any stale AAAA record unless
-you also configure IPv6.
+The supported hosted path is [deploy/app.yaml](deploy/app.yaml), using the existing
+Dockerfile, a PostgreSQL database, port 8000, and `/healthz`. App Platform assigns
+an HTTPS `ondigitalocean.app` address; no custom domain, DNS setup, reverse proxy,
+or manual certificate management is required. Its filesystem is ephemeral, so
+`DATABASE_URL` selects PostgreSQL. The spec sets `APP_PLATFORM=true` to reject
+startup if the binding is missing instead of silently using SQLite.
 
-Copy this project and a **relay-only** `.env` to a private directory on the Droplet,
-for example `/opt/issue-to-pr`. That file needs `GITHUB_REPOSITORY`, `AGENT_LABEL`,
-`GITHUB_WEBHOOK_SECRET`, `RELAY_GITHUB_TOKEN`, `HARNESS_TRIGGER_URL`,
-`HARNESS_TRIGGER_SECRET`, and `RELAY_DOMAIN`. Keep the inference key and Slack
-webhook off the relay host: DO captured them when the trigger was created.
+1. Connect App Platform's GitHub integration to **your setup-repo copy** (grant it
+   access if private). This build-source connection is separate from the agent's
+   GitHub OAuth connection. Copy `deploy/app.yaml` to `deploy/app.local.yaml` and
+   restrict it with `chmod 600 deploy/app.local.yaml`. Update `github.repo`, branch,
+   app name, region and `GITHUB_REPOSITORY` in that private copy. `github.repo` is the setup
+   repository; `GITHUB_REPOSITORY` is the buggy demo target. Push the relay changes
+   to the source branch before deploying. Automatic deploy-on-push is disabled.
+2. Set the runtime **Secret** values
+   `GITHUB_WEBHOOK_SECRET`, `RELAY_GITHUB_TOKEN`, `HARNESS_TRIGGER_URL` and
+   `HARNESS_TRIGGER_SECRET` in that private spec before deployment. To use the
+   Control Panel instead, configure the same resources and secrets in its
+   creation flow. Preserve the literal binding
+   `${relay-db.DATABASE_URL}`; it is resolved by App Platform, not your shell.
+   The relay needs no inference key, Slack webhook or DO API credential.
+3. Validate the spec before creation. A private `deploy/app.local.yaml` is ignored
+   by Git and excluded from Docker builds. Never commit credentials or print a
+   resolved spec. For an initial structural check, the checked-in placeholders
+   suffice:
 
-From the project directory on the Droplet:
+   ```bash
+   doctl --context "$DOCTL_CONTEXT" apps propose --spec deploy/app.yaml
+   ```
+
+   This validates a proposal and reports cost without creating the app. It does
+   not test source access, secrets, database permissions or a live deployment.
+   Validate your completed private spec as well. Review the cost, then create a
+   **new** app when ready. This next command is the separate **billable** step:
+
+   ```bash
+   doctl --context "$DOCTL_CONTEXT" apps create --spec deploy/app.local.yaml
+   ```
+
+   Keep that private file out of source control and restrict it with `chmod 600`.
+   Do not update an unrelated existing app. Runtime secrets can subsequently be
+   managed through the app's Settings in the Control Panel.
+4. After deployment, copy the generated HTTPS address from App Platform and check:
+
+   ```bash
+   curl --fail https://YOUR_APP.ondigitalocean.app/healthz
+   ```
+
+   Use the app's runtime logs for `worker_leader`, `queued`, and `forwarded` with
+   an execution ID. `/healthz` checks the database and worker task; a standby
+   waiting for leadership is healthy. It does not check GitHub or Harness Runtime.
+5. At cutover, disable the old **direct GitHub webhook**, pause its **Harness
+   Runtime trigger** and let any active direct runs finish:
+
+   ```bash
+   doctl --context "$DOCTL_CONTEXT" harness-runtime triggers pause DIRECT_TRIGGER_ID
+   ```
+
+   Confirm the separate custom trigger is active. Add an **Issues** webhook for
+   `https://YOUR_APP.ondigitalocean.app/webhooks/github`, JSON content, SSL
+   verification enabled, and `GITHUB_WEBHOOK_SECRET`. Test a fresh small issue;
+   verify its execution, PR and Slack summary. Redelivering the same delivery ID
+   should show `duplicate` without another forward. For rollback, disable the
+   relay webhook and pause the custom trigger before restoring the direct route.
+
+The spec includes a **development PostgreSQL database** for this demo. It persists
+across service replacements, but is not intended for production. For a production
+installation, attach an existing DigitalOcean Managed PostgreSQL cluster: set
+`production: true`, `cluster_name`, `db_name` and `db_user` in the database component,
+keep its component name `relay-db`, and grant the app trusted-source access and
+permission to create/update its table. Use a direct database connection, not a
+transaction-pooling endpoint: leadership uses a session advisory lock. Keep the
+same database when updating the app; replacing/deleting it loses the delivery
+history. Back up the inbox before database changes. PostgreSQL and SQLite inboxes
+are independent; changing backends does not migrate old records automatically.
+
+The Dockerfile runs one Uvicorn process per service instance. PostgreSQL elects
+one worker across overlapping instances during rolling deployments. A new leader
+marks interrupted sends `uncertain` before taking pending work. A lost leadership
+connection stops that worker; it never silently reconnects and resumes forwarding.
+A replacement instance can then acquire leadership. Keep SQLite to one local
+process with a persistent local file.
+
+For local PostgreSQL verification, point `TEST_DATABASE_URL` at a disposable test
+database, then run the suite. The test role needs schema create/drop permission:
 
 ```bash
-chmod 600 .env
-docker compose --env-file .env -f deploy/compose.yaml up -d --build
-docker compose --env-file .env -f deploy/compose.yaml logs -f relay caddy
-curl --fail https://YOUR_RELAY_DOMAIN/healthz
+TEST_DATABASE_URL=postgresql://USER:PASSWORD@localhost:5432/relay_test python -m pytest -q
 ```
 
-Caddy obtains and renews the certificate. Compose restarts both containers after
-reboots. The relay runs as a non-root user, with a read-only container filesystem
-and a named volume for SQLite; the 1 MiB request limit is enforced at both layers.
+Without this variable, PostgreSQL tests are explicitly skipped. Tests use isolated
+schemas and mock outgoing HTTP; they never call a real trigger.
 
-Create a new GitHub webhook for `https://YOUR_RELAY_DOMAIN/webhooks/github`, using
-`GITHUB_WEBHOOK_SECRET`, JSON, SSL verification, and **Issues** only. Apply `agent`
-to a fresh small issue. Logs should show `queued`, then `forwarded` with a DO
-execution ID. Verify the PR and Slack summary again. Re-delivering the same GitHub
-delivery should show `duplicate` without another forward.
-
-**App Platform alternative:** deploy the Dockerfile as one web service with port
-8000 and the same relay environment variables; App Platform can provide HTTPS.
-This SQLite example depends on persistent local storage and one process. App
-Platform's ephemeral filesystem does not preserve the inbox across replacements,
-so move it to managed PostgreSQL or a durable queue before using that deployment.
+References: [app spec](https://docs.digitalocean.com/products/app-platform/reference/app-spec/),
+[database options](https://docs.digitalocean.com/products/app-platform/how-to/manage-databases/),
+[generated domains](https://docs.digitalocean.com/products/app-platform/how-to/manage-domains/),
+[spec proposals](https://docs.digitalocean.com/reference/doctl/reference/apps/propose/),
+[app creation](https://docs.digitalocean.com/products/app-platform/how-to/create-apps/).
 
 ## Troubleshooting and delivery behavior
 
@@ -338,10 +403,11 @@ doctl --context "$DOCTL_CONTEXT" harness-runtime logs SESSION_ID
 | Tests cannot install dependencies | Add only the required registry hosts to spec egress, then update/recreate the trigger |
 | No Slack summary | Inspect execution status and output; verify incoming webhook and output settings |
 
-The receiver returns 202 **after SQLite commit**, before API calls. The delivery
-ID is unique per source, and records survive normal restarts. Run exactly **one
-worker/process/replica** against this database. The queue contains issue text:
-protect/back up the data volume and keep it out of source control. The example
+The receiver returns 202 **after the database commit**, before external API calls.
+If persistence fails, it returns 503 so the delivery can be retried; do not assume
+GitHub will automatically redeliver a failed webhook. Delivery IDs are unique per
+source. PostgreSQL retains the queue and dedup records across app replacements.
+The inbox contains issue text: restrict database access and backups. The example
 retains dedup records indefinitely; plan retention for long-running deployments.
 
 A successful DO response means an execution was accepted, not that the PR or Slack
@@ -350,16 +416,19 @@ a 202 without an execution ID is marked `uncertain`; a rejected POST is `failed`
 These POSTs are not automatically retried because acceptance may be ambiguous.
 Check DO executions first. Only if no execution was accepted, requeue that ID:
 
+Use App Platform's **relay component console**, which has the bound runtime
+environment. From `/app`:
+
 ```bash
-docker compose --env-file .env -f deploy/compose.yaml exec relay \
-  python scripts/retry_delivery.py DELIVERY_UUID --confirmed-no-execution
+python -m scripts.retry_delivery DELIVERY_UUID --confirmed-no-execution
 ```
 
-Inspect inbox state without printing stored issue bodies:
+Locally, run the same module from the project root after loading your trusted
+`.env`. `DATABASE_URL` takes precedence over the local `DATABASE_PATH`.
+For database inspection, use a private database client and select only metadata:
 
-```bash
-docker compose --env-file .env -f deploy/compose.yaml exec relay python -c \
-  'import sqlite3; print(sqlite3.connect("/data/relay.sqlite3").execute("SELECT delivery,status,reason,execution_id FROM deliveries").fetchall())'
+```sql
+SELECT delivery, status, reason, execution_id FROM deliveries;
 ```
 
 GitHub redelivery of a recorded failed/uncertain delivery remains a duplicate;
@@ -370,7 +439,7 @@ branch/PR and never force pushes; this is not an exactly-once distributed system
 ## Duplicate handling when issues or PRs change
 
 There are two separate checks. The direct path uses DO's webhook-delivery
-deduplication. The relay additionally persists `(source, delivery ID)` in SQLite;
+deduplication. The relay additionally persists `(source, delivery ID)` in its database;
 deleting an issue, closing a PR or deleting a branch does not erase that inbox
 record. Its protection lasts while the database and record are retained.
 Removing and reapplying a label creates a new event, so delivery deduplication
@@ -436,7 +505,7 @@ across new issues would still be a separate feature. Neither is implemented here
 Add a handler file such as `relay/linear.py`. Implement `verify(body, headers)`,
 `delivery_id(headers)`, `prepare(body, headers)` and async `authorized(candidate)`;
 raise `Skip` for ignored events. Register it in `sources` in `relay/app.py` and add
-its environment configuration. The existing SQLite inbox, outgoing signature and
+its environment configuration. The existing durable inbox, outgoing signature and
 DO trigger stay the same. Normalize the event into the same repo/issue payload,
 or use a separate prompt for a task that is not a GitHub issue. Add source-specific
 signature/trust tests. Sentry, Box and n8n should verify their own inbound schemes
